@@ -59,101 +59,133 @@ def parse_icmp(icmp_data):
 
 PCAP_FILE ="sample.pcap"
 
-with open(PCAP_FILE, "rb") as file:
-    # read the 24-byte global header
-    global_header = file.read(24)
+def main():
+    
+    with open(PCAP_FILE, "rb") as file:
+        # read the 24-byte global header
+        global_header = file.read(24)
 
-    if len(global_header) != 24:
-        raise ValueError("Invalid PCAP global header")
+        if len(global_header) != 24:
+            raise ValueError("Invalid PCAP global header")
 
-    # Identify byte order and timestamp format
-    magic = global_header[:4]
+        # Identify byte order and timestamp format
+        magic = global_header[:4]
 
-    formats = {
-        b"\xd4\xc3\xb2\xa1": ("<", "microseconds"),
-        b"\xa1\xb2\xc3\xd4": (">", "microseconds"),
-        b"\x4d\xc3\xb2\xa1": ("<", "nanoseconds"),
-        b"\xa1\xb2\x3c\x4d": (">", "nanoseconds"),
-    }
+        formats = {
+            b"\xd4\xc3\xb2\xa1": ("<", "microseconds"),
+            b"\xa1\xb2\xc3\xd4": (">", "microseconds"),
+            b"\x4d\xc3\xb2\xa1": ("<", "nanoseconds"),
+            b"\xa1\xb2\x3c\x4d": (">", "nanoseconds"),
+        }
 
-    if magic not in formats:
-        raise ValueError("Unsupported PCAP format")
+        if magic not in formats:
+            raise ValueError("Unsupported PCAP format")
 
-    endian, precision = formats[magic]
+        endian, precision = formats[magic]
 
-    # Read link-layer type
-    link_type = struct.unpack(
-        endian + "I", global_header[20:24]
-    )[0]
+        # Read link-layer type
+        link_type = struct.unpack(
+            endian + "I", global_header[20:24]
+        )[0]
 
-    print("=== PCAP ANalysis ===")
-    print(f"Timestamp precision {precision}")
-    print(f"Link-layer type: {link_type}")
+        print("=== PCAP ANalysis ===")
+        print(f"Timestamp precision {precision}")
+        print(f"Link-layer type: {link_type}")
 
-    packet_count = 0
+        packet_count = 0
+        successful = 0
+        malformed = 0
 
-    while True:
-        record_header = file.read(16)
+        while True:
+            record_header = file.read(16)
 
-        if not record_header:
-            break
+            if not record_header:
+                break
 
-        if len(record_header) != 16:
-            raise ValueError("Truncated packet header")
+            if len(record_header) != 16:
+                raise ValueError("Truncated packet header")
 
-        ts_sec, ts_fraction, captured_len, original_len = (
-            struct.unpack(endian + "IIII", record_header)
-        )
+            ts_sec, ts_fraction, captured_len, original_len = (
+                struct.unpack(endian + "IIII", record_header)
+            )
 
-        packet = file.read(captured_len)
+            packet = file.read(captured_len)
 
-        if len(packet) != captured_len:
-            raise ValueError("Truncated packet data")
+            if len(packet) != captured_len:
+                raise ValueError("Truncated packet data")
 
-        packet_count += 1
+            packet_count += 1
 
-        if link_type == 1:
-            ethernet = parse_ethernet(packet)
+            try:
+                if link_type == 1:
+                    ethernet = parse_ethernet(packet)
 
-            if ethernet["ether_type"] == 0x0800:
-                ipv4 = parse_ipv4(packet[14:])
+                if ethernet["ether_type"] == 0x0800:
+                    ipv4 = parse_ipv4(packet[14:])
+
+                    print(
+                        f"Packet {packet_count}: "
+                        f"{ipv4['source_ip']} -> "
+                        f"{ipv4['destination_ip']} "
+                        f"Protocol={ipv4['protocol']} "
+                        f"TTL={ipv4['ttl']}"
+                    )
+
+                    if ipv4["protocol"] == 1:
+                        icmp_offset = 14 + ipv4["header_length"]
+                        icmp_data = packet[icmp_offset:]
+
+                        if len(icmp_data) >= 8 and icmp_data[0] in (0,8):
+                            icmp = parse_icmp(icmp_data)
+
+                            icmp_types = {
+                                0: "Echo Reply",
+                                8: "Echo Request"
+                            }
+
+                            icmp_description = icmp_types.get(icmp["type"], "Unknown ICMP Type")
+
+                            print(
+                                f"ICMP Type: {icmp_description} "
+                                f"ICMP Code: {icmp['code']} "
+                                f"ICMP Checksum: {icmp['checksum']} "
+                                f"ICMP Identifier: {icmp['identifier']} "
+                                f"ICMP Sequence: {icmp['sequence']} "
+                            )
+
+                        successful += 1
+
+            except ValueError as error:
+                malformed += 1
+                print(f"Packet {packet_count}: {error}")
+                continue
+
 
                 print(
                     f"Packet {packet_count}: "
-                    f"{ipv4['source_ip']} -> "
-                    f"{ipv4['destination_ip']} "
-                    f"Protocol={ipv4['protocol']} "
-                    f"TTL={ipv4['ttl']}"
+                    f"{captured_len} captured bytes, "
+                    f"{original_len} original bytes"
                 )
 
-                if ipv4["protocol"] == 1:
-                    icmp_offset = 14 + ipv4["header_length"]
-                    icmp_data = packet[icmp_offset:]
+            print(f"\nTotal packets: {packet_count}")
+            print(f"\nSuccesful packets: {successful}")
+            print(f"\nMalformed packets: {malformed}")
 
-                    if len(icmp_data) >= 8 and icmp_data[0] in (0,8):
-                       icmp = parse_icmp(icmp_data)
+            if packet_count > 0:
+                print(f"\nMalformed rate: {malformed / packet_count:.2f}%")
 
-                       icmp_types = {
-                        0: "Echo Reply",
-                        8: "Echo Request"
-                       }
+    def test_short_ethernet_frame():
+        packet = b"\x00\x01\x02\x03\x04"
 
-                       icmp_description = icmp_types[icmp["type"]]
+        try:
+            parse_ethernet(packet)
+            print("FAIL: Invalid packet was accepted")
 
-                       print(
-                        f"ICMP Type: {icmp_description} "
-                        f"ICMP Code: {icmp["code"]} "
-                        f"ICMP Checksum: {icmp["checksum"]} "
-                        f"ICMP Identifier: {icmp["identifier"]} "
-                        f"ICMP Sequence: {icmp["sequence"]} "
-                       )
+        except ValueError as error:
+            print("PASS: Invalid packet was rejected")
+            print(f"Reason: {error}")
 
+    test_short_ethernet_frame()
 
-
-        print(
-            f"Packet {packet_count}: "
-            f"{captured_len} captured bytes, "
-            f"{original_len} original bytes"
-        )
-
-    print(f"\nTotal packets: {packet_count}")
+if __name__ == "__main__":
+    main()
